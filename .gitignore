@@ -1,0 +1,17 @@
+# Data directory: registry.db + per-site *.db files (and WAL/SHM sidecars)
+/data/
+
+# Build output
+/monitor
+/monitor.exe
+/monitor_host.exe
+/bin/
+
+# Secrets — never commit API keys / env files
+*.env
+.env
+/secrets/
+
+# Editor / OS cruft
+.DS_Store
+*.swp

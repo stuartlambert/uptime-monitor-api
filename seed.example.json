@@ -1,0 +1,20 @@
+[
+  {
+    "name": "Example Site",
+    "url": "https://example.com",
+    "interval_seconds": 60,
+    "slow_interval_seconds": 3600,
+    "enabled": true,
+    "checks": {
+      "http": { "enabled": true, "expect_status": [] },
+      "latency": { "enabled": true, "max_ms": 2000 },
+      "content": {
+        "enabled": true,
+        "must_contain": ["Example Domain"],
+        "must_not_contain": ["Exception", "stack trace"]
+      },
+      "ssl": { "enabled": true, "warn_days": 14 },
+      "dns": { "enabled": true }
+    }
+  }
+]

@@ -1,0 +1,7 @@
+# Normalize line endings: LF in the repo for all text files. Keeps Go sources,
+# shell snippets, and the Makefile consistent regardless of checkout platform.
+* text=auto eol=lf
+
+# Explicitly binary (never touched):
+*.db binary
+*.png binary
