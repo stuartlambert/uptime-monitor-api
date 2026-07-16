@@ -22,15 +22,18 @@ import (
 
 // Server wires the HTTP handlers to the registry, per-site stores, and scheduler.
 type Server struct {
-	reg    *storage.Registry
-	stores *storage.Manager
-	sched  *scheduler.Manager
-	apiKey string // if non-empty, required via X-API-Key
+	reg         *storage.Registry
+	stores      *storage.Manager
+	sched       *scheduler.Manager
+	apiKey      string   // if non-empty, required via X-API-Key
+	corsOrigins []string // exact-match allowlist of browser origins; empty = CORS off
 }
 
 // NewServer constructs the API server. apiKey may be empty to disable auth.
-func NewServer(reg *storage.Registry, stores *storage.Manager, sched *scheduler.Manager, apiKey string) *Server {
-	return &Server{reg: reg, stores: stores, sched: sched, apiKey: apiKey}
+// corsOrigins is an optional exact-match allowlist of browser Origins (e.g.
+// "https://portal.pinkcrab.co.uk"); omit it to leave CORS disabled.
+func NewServer(reg *storage.Registry, stores *storage.Manager, sched *scheduler.Manager, apiKey string, corsOrigins ...string) *Server {
+	return &Server{reg: reg, stores: stores, sched: sched, apiKey: apiKey, corsOrigins: corsOrigins}
 }
 
 // Handler builds the routed http.Handler.
@@ -64,7 +67,44 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /sites/{id}/incidents", s.requireSiteRead(s.handleIncidents))
 	mux.HandleFunc("GET /sites/{id}/results", s.requireSiteRead(s.handleResults))
 
-	return mux
+	return s.withCORS(mux)
+}
+
+// withCORS wraps the mux, adding CORS response headers when the request carries
+// an Origin on the allowlist. It also answers preflight OPTIONS requests (which
+// the method-specific mux would otherwise 405) directly with 204.
+//
+// Origins are matched exactly and echoed back individually — never "*" — because
+// the API authenticates with the X-API-Key header, and a fixed origin keeps that
+// header usable from the browser. Requests with no/unlisted Origin pass through
+// unchanged and simply receive no CORS headers.
+func (s *Server) withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" && s.originAllowed(origin) {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Add("Vary", "Origin") // response varies per-origin; keep caches honest
+			h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			h.Set("Access-Control-Allow-Headers", "X-API-Key, Content-Type")
+			h.Set("Access-Control-Max-Age", "600")
+		}
+		if r.Method == http.MethodOptions {
+			// Preflight: the headers above are the whole response.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originAllowed reports whether origin is in the configured CORS allowlist.
+func (s *Server) originAllowed(origin string) bool {
+	for _, o := range s.corsOrigins {
+		if o == origin {
+			return true
+		}
+	}
+	return false
 }
 
 // keyMatches is a constant-time comparison of the presented header against want.

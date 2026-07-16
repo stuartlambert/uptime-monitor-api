@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,28 +32,31 @@ func main() {
 		reqTimeout = flag.Duration("request-timeout", 15*time.Second, "per-check HTTP request timeout")
 		seedPath   = flag.String("seed", "", "optional JSON file of site configs to import on startup")
 		blockPriv  = flag.Bool("block-private-targets", false, "refuse to check private/loopback/link-local addresses (SSRF guard); leave off to monitor internal hosts")
+		corsOrigin = flag.String("cors-origins", "https://portal.pinkcrab.co.uk", "comma-separated browser origins allowed via CORS (empty = disabled)")
 	)
 	flag.Parse()
 
 	if err := run(runOpts{
-		dataDir:    *dataDir,
-		addr:       *addr,
-		apiKey:     *apiKey,
-		reqTimeout: *reqTimeout,
-		seedPath:   *seedPath,
-		blockPriv:  *blockPriv,
+		dataDir:     *dataDir,
+		addr:        *addr,
+		apiKey:      *apiKey,
+		reqTimeout:  *reqTimeout,
+		seedPath:    *seedPath,
+		blockPriv:   *blockPriv,
+		corsOrigins: splitOrigins(*corsOrigin),
 	}); err != nil {
 		log.Fatal(err)
 	}
 }
 
 type runOpts struct {
-	dataDir    string
-	addr       string
-	apiKey     string
-	reqTimeout time.Duration
-	seedPath   string
-	blockPriv  bool
+	dataDir     string
+	addr        string
+	apiKey      string
+	reqTimeout  time.Duration
+	seedPath    string
+	blockPriv   bool
+	corsOrigins []string
 }
 
 func run(o runOpts) error {
@@ -87,7 +91,7 @@ func run(o runOpts) error {
 
 	srv := &http.Server{
 		Addr:              o.addr,
-		Handler:           api.NewServer(reg, stores, sched, o.apiKey).Handler(),
+		Handler:           api.NewServer(reg, stores, sched, o.apiKey, o.corsOrigins...).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -164,4 +168,16 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// splitOrigins parses a comma-separated origin list into a trimmed slice,
+// dropping empty entries (so "" yields nil and CORS stays disabled).
+func splitOrigins(s string) []string {
+	var out []string
+	for _, o := range strings.Split(s, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
 }

@@ -72,6 +72,13 @@ WantedBy=multi-user.target
 | `-request-timeout` | `15s`     | per-check HTTP timeout                           |
 | `-seed`            | *(empty)* | JSON file of site configs to import on startup  |
 | `-block-private-targets` | `false` | refuse to check private/loopback/link-local addresses (SSRF guard) |
+| `-cors-origins`    | `https://portal.pinkcrab.co.uk` | comma-separated browser origins allowed via CORS (empty = disabled) |
+
+CORS is only relevant when a **browser** calls the API from another origin
+(server-to-server clients ignore it). Listed origins are matched exactly and
+echoed back in `Access-Control-Allow-Origin` — never `*`, since the API
+authenticates with the `X-API-Key` header. Preflight `OPTIONS` requests are
+answered with `204`. Set `-cors-origins=""` to disable CORS entirely.
 
 Seed on first run to bootstrap sites:
 

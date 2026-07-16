@@ -24,7 +24,7 @@ type testEnv struct {
 	reg    *storage.Registry
 }
 
-func newTestEnv(t *testing.T, apiKey string) *testEnv {
+func newTestEnv(t *testing.T, apiKey string, corsOrigins ...string) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
 	stores, err := storage.NewManager(dir)
@@ -36,7 +36,7 @@ func newTestEnv(t *testing.T, apiKey string) *testEnv {
 		t.Fatal(err)
 	}
 	sched := scheduler.NewManager(stores, checker.NewRunner(2*time.Second, false))
-	srv := httptest.NewServer(NewServer(reg, stores, sched, apiKey).Handler())
+	srv := httptest.NewServer(NewServer(reg, stores, sched, apiKey, corsOrigins...).Handler())
 	t.Cleanup(func() {
 		srv.Close()
 		sched.Shutdown()
@@ -366,5 +366,64 @@ func TestDataEndpoints(t *testing.T) {
 	json.Unmarshal(body, &st)
 	if code != 200 || st.Up == nil || *st.Up {
 		t.Errorf("status: code=%d up=%v", code, st.Up)
+	}
+}
+
+// doOrigin issues a request with an Origin header and returns the response so
+// CORS headers can be inspected.
+func (e *testEnv) doOrigin(t *testing.T, method, path, origin string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, e.srv.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp
+}
+
+func TestCORS(t *testing.T) {
+	const allowed = "https://portal.pinkcrab.co.uk"
+	e := newTestEnv(t, "", allowed)
+
+	// Allowed origin on a normal GET: the origin is echoed back.
+	resp := e.doOrigin(t, http.MethodGet, "/health", allowed)
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != allowed {
+		t.Errorf("allowed GET: Allow-Origin = %q, want %q", got, allowed)
+	}
+	if got := resp.Header.Get("Vary"); !strings.Contains(got, "Origin") {
+		t.Errorf("allowed GET: Vary = %q, want to contain Origin", got)
+	}
+
+	// Preflight for the allowed origin: 204 with the CORS headers, no routing to a handler.
+	pre := e.doOrigin(t, http.MethodOptions, "/sites", allowed)
+	if pre.StatusCode != http.StatusNoContent {
+		t.Errorf("preflight: status = %d, want 204", pre.StatusCode)
+	}
+	if got := pre.Header.Get("Access-Control-Allow-Origin"); got != allowed {
+		t.Errorf("preflight: Allow-Origin = %q, want %q", got, allowed)
+	}
+	if got := pre.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(got, "X-API-Key") {
+		t.Errorf("preflight: Allow-Headers = %q, want to contain X-API-Key", got)
+	}
+
+	// Disallowed origin: no CORS headers leak out.
+	other := e.doOrigin(t, http.MethodGet, "/health", "https://evil.example.com")
+	if got := other.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("disallowed origin: Allow-Origin = %q, want empty", got)
+	}
+}
+
+func TestCORSDisabledByDefault(t *testing.T) {
+	e := newTestEnv(t, "") // no origins configured
+	resp := e.doOrigin(t, http.MethodGet, "/health", "https://portal.pinkcrab.co.uk")
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("CORS off: Allow-Origin = %q, want empty", got)
 	}
 }
