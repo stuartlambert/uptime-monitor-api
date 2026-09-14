@@ -41,13 +41,21 @@ export function Sparkline({ points, field }: SparklineProps) {
 
 interface UptimeBarsProps {
   points: SeriesPoint[]
+  /** Bucket width in seconds; needed to turn a clicked bar into a [from,to) window. */
+  bucketSeconds?: number
+  /** When set, bars become clickable and call this with the bar's window. */
+  onSelect?: (from: number, to: number) => void
+  /** The `ts` of the currently selected bar, so it can be highlighted. */
+  selectedTs?: number | null
 }
 
 /** One bar per bucket. Empty buckets render grey rather than being skipped, so a
- *  monitoring gap is visible instead of being closed up by the neighbours. */
-export function UptimeBars({ points }: UptimeBarsProps) {
+ *  monitoring gap is visible instead of being closed up by the neighbours.
+ *  When `onSelect` is given, each bar is a button that reports its time window. */
+export function UptimeBars({ points, bucketSeconds = 0, onSelect, selectedTs }: UptimeBarsProps) {
+  const interactive = !!onSelect
   return (
-    <div className="bars" role="img" aria-label="Uptime by period">
+    <div className={`bars${interactive ? ' clickable' : ''}`} role="img" aria-label="Uptime by period">
       {points.map((p, i) => {
         let cls = 'none'
         let height = '30%'
@@ -55,13 +63,31 @@ export function UptimeBars({ points }: UptimeBarsProps) {
           height = '100%'
           cls = p.uptime_percent >= 99.5 ? '' : p.uptime_percent >= 90 ? 'partial' : 'bad'
         }
+        const when = new Date(p.ts * 1000).toLocaleString(undefined,
+          { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
         const title = p.checks === 0
-          ? 'No checks in this period'
-          : `${p.uptime_percent}% over ${p.checks} check${p.checks === 1 ? '' : 's'}`
+          ? `No checks — ${when}`
+          : `${p.uptime_percent}% over ${p.checks} check${p.checks === 1 ? '' : 's'} — ${when}`
+        const selected = selectedTs != null && p.ts === selectedTs
+        const className = `bar ${cls}${selected ? ' selected' : ''}`
+        if (!interactive) {
+          return (
+            <div key={i} className={className} style={{ height }}>
+              <title>{title}</title>
+            </div>
+          )
+        }
         return (
-          <div key={i} className={`bar ${cls}`} style={{ height }}>
-            <title>{title}</title>
-          </div>
+          <button
+            key={i}
+            type="button"
+            className={className}
+            style={{ height }}
+            title={title}
+            aria-label={`View incidents for ${when}`}
+            aria-pressed={selected}
+            onClick={() => onSelect!(p.ts, p.ts + bucketSeconds)}
+          />
         )
       })}
     </div>

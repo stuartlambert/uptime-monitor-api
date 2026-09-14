@@ -14,6 +14,7 @@ export function SiteDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [purge, setPurge] = useState(false)
   const [nowTs, setNowTs] = useState(() => Math.floor(Date.now() / 1000))
+  const [selectedBar, setSelectedBar] = useState<{ from: number; to: number } | null>(null)
   const qc = useQueryClient()
   const navigate = useNavigate()
 
@@ -25,7 +26,7 @@ export function SiteDetail() {
   const uptime = useQuery({ queryKey: ['uptime', id, window], queryFn: () => api.uptime(id, window) })
   const series = useQuery({ queryKey: ['series', id, window, 60], queryFn: () => api.series(id, window, 60) })
   const incidents = useQuery({
-    queryKey: ['incidents', id], queryFn: () => api.incidents(id, 25), refetchInterval: 30_000,
+    queryKey: ['incidents', id], queryFn: () => api.incidents(id, 1000), refetchInterval: 30_000,
   })
   const errors = useQuery({ queryKey: ['errors', id], queryFn: () => api.errors(id, 50) })
 
@@ -59,6 +60,15 @@ export function SiteDetail() {
   const u = uptime.data
   const m = metrics.data
 
+  // Incidents shown inline: the whole set filtered to a clicked bar's window, or
+  // the 25 most recent otherwise. An incident overlaps a [from,to) window if it
+  // started before the window ends and had not resolved before it began.
+  const allIncidents = incidents.data ?? []
+  const shownIncidents = selectedBar
+    ? allIncidents.filter((i) =>
+        i.started_at < selectedBar.to && (i.resolved_at ?? nowTs) >= selectedBar.from)
+    : allIncidents.slice(0, 25)
+
   return (
     <>
       <div className="page-head">
@@ -68,7 +78,7 @@ export function SiteDetail() {
         </div>
         <span className="spacer" />
         <StatusPill up={status.data?.up ?? null} enabled={cfg?.enabled ?? true} />
-        <WindowPicker value={window} onChange={setWindow} />
+        <WindowPicker value={window} onChange={(w) => { setWindow(w); setSelectedBar(null) }} />
         <Link className="btn" to={`/site/${id}/edit`}>Edit</Link>
       </div>
 
@@ -118,9 +128,17 @@ export function SiteDetail() {
             {series.data ? `${series.data.points.length} periods of ${series.data.bucket_seconds}s` : ''}
           </span>
         </div>
-        {series.data ? <UptimeBars points={series.data.points} /> : <div className="skeleton" style={{ height: 34 }} />}
+        {series.data ? (
+          <UptimeBars
+            points={series.data.points}
+            bucketSeconds={series.data.bucket_seconds}
+            selectedTs={selectedBar?.from ?? null}
+            onSelect={(from, to) =>
+              setSelectedBar((cur) => (cur && cur.from === from ? null : { from, to }))}
+          />
+        ) : <div className="skeleton" style={{ height: 34 }} />}
         <p className="subtle" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-          Grey means no checks ran in that period.
+          Grey means no checks ran in that period. Click a bar to see the incidents in that window.
         </p>
       </div>
 
@@ -133,16 +151,28 @@ export function SiteDetail() {
 
       <div className="grid cols-2" style={{ marginTop: 16 }}>
         <div className="card" style={{ marginTop: 0 }}>
-          <div className="card-head"><h2>Incidents</h2></div>
-          {(incidents.data ?? []).length === 0 ? (
+          <div className="card-head">
+            <h2>Incidents</h2>
+            <span className="spacer" />
+            <Link className="subtle" style={{ fontSize: 12 }} to={`/site/${id}/history`}>View all →</Link>
+          </div>
+          {selectedBar && (
+            <div className="filter-chip">
+              <span>Incidents during {fmtTime(selectedBar.from)} – {fmtTime(selectedBar.to)}</span>
+              <button type="button" className="link" onClick={() => setSelectedBar(null)}>Clear</button>
+            </div>
+          )}
+          {allIncidents.length === 0 ? (
             <p className="subtle" style={{ margin: 0 }}>No incidents recorded.</p>
+          ) : shownIncidents.length === 0 ? (
+            <p className="subtle" style={{ margin: 0 }}>No incidents in the selected period.</p>
           ) : (
             <>
               <div className="table-wrap">
                 <table style={{ minWidth: 360 }}>
                   <thead><tr><th>Started</th><th>Resolved</th><th>Down for</th><th>Cause</th></tr></thead>
                   <tbody>
-                    {incidents.data!.map((inc) => {
+                    {shownIncidents.map((inc) => {
                       const ongoing = inc.resolved_at === null
                       const downForS = ongoing
                         ? Math.max(0, nowTs - inc.started_at)
@@ -164,14 +194,22 @@ export function SiteDetail() {
                 </table>
               </div>
               <p className="subtle" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-                Each row is one outage; the site recovered between separate rows. “Down for” is the total time offline.
+                {selectedBar
+                  ? 'Showing incidents that overlap the selected period. “Down for” is the total time offline.'
+                  : allIncidents.length > shownIncidents.length
+                    ? `Showing the ${shownIncidents.length} most recent of ${allIncidents.length}. Use “View all” for the rest.`
+                    : 'Each row is one outage; the site recovered between separate rows. “Down for” is the total time offline.'}
               </p>
             </>
           )}
         </div>
 
         <div className="card" style={{ marginTop: 0 }}>
-          <div className="card-head"><h2>Recent errors</h2></div>
+          <div className="card-head">
+            <h2>Recent errors</h2>
+            <span className="spacer" />
+            <Link className="subtle" style={{ fontSize: 12 }} to={`/site/${id}/history`}>View all →</Link>
+          </div>
           {(errors.data ?? []).length === 0 ? (
             <p className="subtle" style={{ margin: 0 }}>No errors recorded.</p>
           ) : (

@@ -4,6 +4,7 @@ import { api, UnauthorizedError } from './api/client'
 import { Login } from './pages/Login'
 import { Dashboard } from './pages/Dashboard'
 import { SiteDetail } from './pages/SiteDetail'
+import { SiteHistory } from './pages/SiteHistory'
 import { SiteForm } from './pages/SiteForm'
 import { Alerts } from './pages/Alerts'
 import { Settings } from './pages/Settings'
@@ -65,6 +66,7 @@ export default function App() {
           <Route path="/login" element={<Navigate to="/" replace />} />
           <Route path="/site/new" element={<SiteForm mode="create" />} />
           <Route path="/site/:id/edit" element={<SiteForm mode="edit" />} />
+          <Route path="/site/:id/history" element={<SiteHistory />} />
           <Route path="/site/:id" element={<SiteDetail />} />
           <Route path="/alerts" element={<Alerts />} />
           <Route path="/settings" element={<Settings />} />
