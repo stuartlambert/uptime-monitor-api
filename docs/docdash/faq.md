@@ -84,6 +84,16 @@ the rule if you want every blip.
 Checks start within one interval, up to 60 seconds by default. `up` is `null`
 until the first completes — distinct from `false`, meaning down.
 
+## Why did avg_ms change when nothing happened?
+
+Latency figures cover successful checks only and are computed at query time, so
+changing the window changes the figure — the same period can read differently at
+`24h` and `7d` if failures fell in between.
+
+Two deploys also moved it historically: rounding to 2dp, and excluding failed
+checks from the mean so it agrees with the percentiles. Both recalculated past
+windows. Nothing stored ever changed.
+
 ## How do I see every incident, not just recent ones?
 
 **View all** on the site detail page, or go straight to `/site/<id>/history`.

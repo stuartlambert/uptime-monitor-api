@@ -27,7 +27,8 @@ cd ~/Projects/uptime-monitor-api
 ./deploy/deploy.sh --ui-only      # UI only — no restart, zero downtime
 ```
 
-It tests, checks the binary is linux/amd64, backs up the old one, restarts,
+It runs `go vet` and `go test`, checks the binary is linux/amd64, backs up the
+old one, restarts,
 health-checks over loopback, rsyncs `web/dist`, runs `plesk repair fs`, then
 probes the public endpoints.
 
@@ -51,6 +52,7 @@ Flags live on the `ExecStart` line in the unit; secrets come from the env file.
 | `-cors-origins` | default `https://portal.pinkcrab.co.uk` | exact-match browser origin allowlist |
 | `-request-timeout` | default 15s | per-check HTTP timeout |
 | `-api-key` | from `UPTIME_API_KEY` | admin key |
+| `-seed` | unused here | JSON file of site configs to import at startup |
 | `-set-password <user>` | — | set a password and exit |
 
 Never set `-real-ip-header` to `X-Forwarded-For` behind Cloudflare: Cloudflare
