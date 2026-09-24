@@ -15,3 +15,7 @@
 # Editor / OS cruft
 .DS_Store
 *.swp
+
+# Admin UI build artefacts
+/web/node_modules/
+/web/dist/

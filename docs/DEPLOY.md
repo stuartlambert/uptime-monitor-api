@@ -199,8 +199,21 @@ Notes:
 Confirm it's up locally before wiring the proxy:
 
 ```sh
-curl -s http://127.0.0.1:8080/health      # -> {"status":"ok","time":...}
+curl -s http://127.0.0.1:8080/api/health      # -> {"status":"ok","time":...}
 ```
+
+> **If you are installing the admin UI**, the vhost in this section is not the
+> one you want: it proxies every path to the daemon, leaving nowhere to serve the
+> UI from. Use one of these instead, both of which serve the SPA at `/` and
+> proxy only the API paths:
+>
+> - **Plesk** — `deploy/plesk-additional-https-directives.conf`, pasted into
+>   *Apache & nginx Settings → Additional HTTPS directives*. Plesk owns the
+>   vhost and regenerates it, so a site file would be discarded.
+> - **Plain Apache, no control panel** — `deploy/apache-monitor.conf`.
+>
+> `docs/ROLLOUT.md` §10 covers the switch. The Cloudflare and certificate steps
+> in §5a below apply either way.
 
 ## 5. Expose the API over HTTPS (on your existing web server)
 
@@ -311,11 +324,11 @@ sudo ufw enable
 export ADMIN_KEY=<your admin key from uptime-monitor.env>
 
 # Liveness (unauthenticated):
-curl https://monitor.example.com/health
+curl https://monitor.example.com/api/health
 # -> {"status":"ok","time":...}
 
 # Authenticated admin read:
-curl -H "X-API-Key: $ADMIN_KEY" https://monitor.example.com/sites
+curl -H "X-API-Key: $ADMIN_KEY" https://monitor.example.com/api/sites
 # -> []   (empty until you add sites)
 ```
 
@@ -324,7 +337,7 @@ doesn't match what you sent.
 
 If you get a **502 Bad Gateway** from Cloudflare, the proxy reached your web
 server but the monitor behind it didn't answer — check
-`curl -s http://127.0.0.1:8080/health` on the box (is the service up?) and that
+`curl -s http://127.0.0.1:8080/api/health` on the box (is the service up?) and that
 the `proxy_pass` target is `127.0.0.1:8080`. See Troubleshooting.
 
 ## 8. Add your first site and mint its consumer key
@@ -333,7 +346,7 @@ the `proxy_pass` target is `127.0.0.1:8080`. See Troubleshooting.
 it **once** in the response. Save it — only its SHA-256 is stored.
 
 ```sh
-curl -X POST https://monitor.example.com/sites \
+curl -X POST https://monitor.example.com/api/sites \
   -H "X-API-Key: $ADMIN_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -356,10 +369,10 @@ Hand that per-site key (not the admin key) to the consuming system:
 
 ```sh
 curl -H "X-API-Key: $MY_API_SITE_KEY" \
-  https://monitor.example.com/sites/my-api/uptime
+  https://monitor.example.com/api/sites/my-api/uptime
 
 curl -H "X-API-Key: $MY_API_SITE_KEY" \
-  'https://monitor.example.com/sites/my-api/metrics?window=24h'
+  'https://monitor.example.com/api/sites/my-api/metrics?window=24h'
 ```
 
 Within a minute or two the check count will climb and an uptime percentage
@@ -370,7 +383,7 @@ appears.
 Takes effect immediately, no restart. The old key stops working at once:
 
 ```sh
-curl -X PUT https://monitor.example.com/sites/my-api \
+curl -X PUT https://monitor.example.com/api/sites/my-api \
   -H "X-API-Key: $ADMIN_KEY" \
   -d '{"name":"My API","url":"https://api.example.com/health","generate_api_key":true}'
 ```
@@ -430,7 +443,7 @@ Schema changes apply automatically on start via versioned migrations
 |---------|--------------|
 | Service restarts, `status=203/EXEC` | Wrong-architecture or non-Linux binary (e.g. ran both `make` targets so the arm64 build won, or `make build` gave a macOS binary), or the binary isn't executable. Run `file /opt/uptime-monitor/monitor` + `uname -m`, rebuild with the matching target, redeploy |
 | `/health` unreachable | Service down (`systemctl status uptime-monitor`) or proxy misconfigured |
-| **Cloudflare 502 Bad Gateway** | Proxy reached the web server but the monitor didn't answer. Check `curl http://127.0.0.1:8080/health` on the box and that `proxy_pass` targets `127.0.0.1:8080` |
+| **Cloudflare 502 Bad Gateway** | Proxy reached the web server but the monitor didn't answer. Check `curl http://127.0.0.1:8080/api/health` on the box and that `proxy_pass` targets `127.0.0.1:8080` |
 | **Cloudflare 526 / SSL errors** | Origin cert not trusted under "Full (strict)" — install a Cloudflare **Origin Certificate**, or drop to "Full" temporarily |
 | Existing sites go offline after setup | A second proxy grabbed 443. Stop/disable it (`systemctl disable --now caddy`) and let your existing web server reclaim 443 |
 | 401 on every authed call | Key mismatch between client and `/etc/uptime-monitor.env` |
