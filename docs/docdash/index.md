@@ -13,7 +13,7 @@ REST API, and emails alerts. A React admin UI sits in front of it.
 | API | `https://monitor.pinkcrab.co.uk/api/` |
 | Repo | `git@github.com:stuartlambert/uptime-monitor-api.git` |
 | Local checkout | `~/Projects/uptime-monitor-api` |
-| Host | IONOS VPS `87.106.69.203`, reached as `ssh ionos-vps` |
+| Host | [IONOS VPS](../servers/ionos-vps/index.md) `87.106.69.203`, reached as `ssh ionos-vps` |
 | Daemon | systemd unit `uptime-monitor`, bound to `127.0.0.1:8080` |
 
 ## Stack

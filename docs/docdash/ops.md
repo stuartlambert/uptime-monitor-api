@@ -7,7 +7,7 @@ updated: 2026-09-24
 
 | | |
 |---|---|
-| Host | `87.106.69.203`, Ubuntu 24.04, Plesk Obsidian — `ssh ionos-vps` |
+| Host | [IONOS VPS](../servers/ionos-vps/index.md) `87.106.69.203` — `ssh ionos-vps` |
 | Binary | `/opt/uptime-monitor/monitor` — `750 uptime:uptime` |
 | Data | `/var/lib/uptime-monitor/` — `registry.db` plus `<site-id>.db` per site |
 | Config | `/etc/uptime-monitor.env` — `0600 root:root` |
