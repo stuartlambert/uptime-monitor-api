@@ -16,19 +16,6 @@ REST API, and emails alerts. A React admin UI sits in front of it.
 | Host | IONOS VPS `87.106.69.203`, reached as `ssh ionos-vps` |
 | Daemon | systemd unit `uptime-monitor`, bound to `127.0.0.1:8080` |
 
-## ⚠ Most of the running code is not in git
-
-The deployed daemon runs features that exist **only in the working tree** on the
-MacBook. A fresh clone builds an older binary with no login, no alerting and no
-dashboard endpoints.
-
-Untracked: `internal/auth/`, `internal/alerts/`, `internal/api/auth.go`,
-`internal/api/alerts.go`, `internal/storage/{admin,alerts,overview,series,session}.go`,
-`cmd/monitor/adminuser.go`, `deploy/`, `docs/ROLLOUT.md`.
-
-Committing this is the open backlog item. Until then `~/Projects/uptime-monitor-api`
-is the only complete copy — do not reclone over it.
-
 ## Stack
 
 | Part | |

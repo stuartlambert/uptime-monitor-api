@@ -107,6 +107,5 @@ accepting that anyone who can add a site can then probe the internal network.
 
 ## Is a fresh clone of the repo enough to deploy?
 
-**No.** Login, alerting, the dashboard endpoints and `deploy/` are untracked and
-exist only in `~/Projects/uptime-monitor-api` on the MacBook. See
-[index](index.md).
+Yes. Everything that runs in production is committed, including `deploy/`.
+Clone, `make linux`, and `./deploy/deploy.sh`.

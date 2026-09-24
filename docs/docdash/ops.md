@@ -130,7 +130,6 @@ Migrations are one-way; if one failed, restore the tarball over
 
 | | |
 |---|---|
-| Commit the untracked backend work | live but not in git — see [index](index.md) |
 | Plesk panel on 8443 | open to the internet; needs a tunnel or an allowlist |
 | 12 OS security patches | needs a window and a reboot |
 | `mod_remoteip` server-wide | unblocks the Apache fail2ban jails, which today would ban Cloudflare edges |
