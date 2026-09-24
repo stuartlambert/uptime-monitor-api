@@ -10,11 +10,15 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/stuart/uptime-monitor/internal/alerts"
+	"github.com/stuart/uptime-monitor/internal/auth"
 	"github.com/stuart/uptime-monitor/internal/config"
 	"github.com/stuart/uptime-monitor/internal/scheduler"
 	"github.com/stuart/uptime-monitor/internal/storage"
@@ -27,16 +31,86 @@ type Server struct {
 	sched       *scheduler.Manager
 	apiKey      string   // if non-empty, required via X-API-Key
 	corsOrigins []string // exact-match allowlist of browser origins; empty = CORS off
+
+	// legacyRoutes keeps the pre-/api/ paths mounted alongside the new prefix
+	// so existing consumers keep working during the migration.
+	legacyRoutes bool
+
+	// secureCookies sets the Secure attribute on the session cookie. Always on
+	// in production; tests turn it off because httptest serves plain HTTP.
+	secureCookies bool
+
+	// realIPHeader names the header carrying the true client address, set by a
+	// trusted reverse proxy. Empty (the default) means trust nothing and use
+	// RemoteAddr. See callerIP for why the default is not X-Forwarded-For.
+	realIPHeader string
+
+	loginLimiter *auth.Limiter
+
+	// sender is the alert transport, used by the test-send endpoint. Nil when no
+	// mail server is configured, which that endpoint reports as 503.
+	sender alerts.Sender
+
+	// deprecationSeen rate-limits the legacy-path warning to one line per path
+	// per deprecationLogEvery, so a consumer polling every minute cannot drown
+	// the journal. Reading it is how you tell when the cutover is safe.
+	deprecationMu   sync.Mutex
+	deprecationSeen map[string]time.Time
 }
+
+// deprecationLogEvery is the per-path quiet period for legacy-route warnings.
+const deprecationLogEvery = time.Hour
 
 // NewServer constructs the API server. apiKey may be empty to disable auth.
 // corsOrigins is an optional exact-match allowlist of browser Origins (e.g.
 // "https://portal.pinkcrab.co.uk"); omit it to leave CORS disabled.
 func NewServer(reg *storage.Registry, stores *storage.Manager, sched *scheduler.Manager, apiKey string, corsOrigins ...string) *Server {
-	return &Server{reg: reg, stores: stores, sched: sched, apiKey: apiKey, corsOrigins: corsOrigins}
+	return &Server{
+		reg: reg, stores: stores, sched: sched, apiKey: apiKey, corsOrigins: corsOrigins,
+		// Default on: a server built without an explicit choice keeps answering
+		// the paths consumers already use. main.go overrides from -legacy-routes.
+		legacyRoutes:    true,
+		deprecationSeen: map[string]time.Time{},
+		secureCookies:   true,
+		loginLimiter:    auth.NewLimiter(0, 0),
+	}
+}
+
+// WithSecureCookies toggles the Secure attribute on the session cookie. Only
+// tests, which run over plain HTTP, should turn it off.
+func (s *Server) WithSecureCookies(on bool) *Server {
+	s.secureCookies = on
+	return s
+}
+
+// WithSender supplies the alert transport used by POST /alerts/channels/{id}/test.
+func (s *Server) WithSender(sender alerts.Sender) *Server {
+	s.sender = sender
+	return s
+}
+
+// WithRealIPHeader names the header a trusted proxy uses to carry the client's
+// address — "CF-Connecting-IP" behind Cloudflare. Leave unset unless a proxy in
+// front is known to overwrite the header on every request; see callerIP.
+func (s *Server) WithRealIPHeader(h string) *Server {
+	s.realIPHeader = h
+	return s
+}
+
+// WithLegacyRoutes controls whether the pre-/api/ paths stay mounted next to
+// /api/. Turn it off once no consumer is hitting them (see the deprecation
+// warnings in the log). Returns s so it can be chained onto NewServer.
+func (s *Server) WithLegacyRoutes(on bool) *Server {
+	s.legacyRoutes = on
+	return s
 }
 
 // Handler builds the routed http.Handler.
+//
+// The API is mounted under /api/. When legacyRoutes is set it is also mounted
+// bare, so consumers written against the original paths keep working until they
+// migrate; those requests log a rate-limited deprecation warning naming the
+// caller. Both mounts share one mux, so the two paths can never drift apart.
 //
 // Authorization has two tiers:
 //   - Admin: the global API key (-api-key). Required for all config CRUD and
@@ -44,13 +118,34 @@ func NewServer(reg *storage.Registry, stores *storage.Manager, sched *scheduler.
 //   - Site read: a per-site key. Grants read access to that one site's data
 //     endpoints only. The admin key also satisfies these.
 //
-// If no admin key is configured and a site has no key, that site's data
-// endpoints are open (matches the "no -api-key = no auth" default).
+// Both tiers fail closed. A site with no per-site key is readable only by an
+// admin; there is no configuration in which these endpoints answer anonymously.
 func (s *Server) Handler() http.Handler {
+	api := s.apiMux()
+
+	root := http.NewServeMux()
+	// StripPrefix takes "/api" without a trailing slash: the pattern below keeps
+	// the slash, so /api/sites must arrive at the inner mux as /sites.
+	root.Handle("/api/", http.StripPrefix("/api", api))
+	if s.legacyRoutes {
+		root.Handle("/", s.warnDeprecated(api))
+	}
+	return s.withCORS(root)
+}
+
+// apiMux routes the API itself, with no prefix. Handler mounts it.
+func (s *Server) apiMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Liveness of the monitor itself — intentionally unauthenticated.
 	mux.HandleFunc("GET /health", s.handleHealth)
+
+	// Session auth for the admin UI. login is necessarily unauthenticated and is
+	// rate-limited instead; the rest require an existing session.
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	mux.HandleFunc("GET /auth/me", s.requireAdmin(s.handleMe))
+	mux.HandleFunc("POST /auth/password", s.requireAdmin(s.handleChangePassword))
 
 	// Config CRUD — admin only.
 	mux.HandleFunc("GET /sites", s.requireAdmin(s.handleListSites))
@@ -59,7 +154,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /sites/{id}", s.requireAdmin(s.handleUpdateSite))
 	mux.HandleFunc("DELETE /sites/{id}", s.requireAdmin(s.handleDeleteSite))
 
+	// Alerting configuration — admin only.
+	mux.HandleFunc("GET /alerts/channels", s.requireAdmin(s.handleListChannels))
+	mux.HandleFunc("POST /alerts/channels", s.requireAdmin(s.handleCreateChannel))
+	mux.HandleFunc("PUT /alerts/channels/{id}", s.requireAdmin(s.handleUpdateChannel))
+	mux.HandleFunc("DELETE /alerts/channels/{id}", s.requireAdmin(s.handleDeleteChannel))
+	mux.HandleFunc("POST /alerts/channels/{id}/test", s.requireAdmin(s.handleTestChannel))
+
+	mux.HandleFunc("GET /alerts/rules", s.requireAdmin(s.handleListRules))
+	mux.HandleFunc("POST /alerts/rules", s.requireAdmin(s.handleCreateRule))
+	mux.HandleFunc("PUT /alerts/rules/{id}", s.requireAdmin(s.handleUpdateRule))
+	mux.HandleFunc("DELETE /alerts/rules/{id}", s.requireAdmin(s.handleDeleteRule))
+
+	mux.HandleFunc("GET /alerts/deliveries", s.requireAdmin(s.handleListDeliveries))
+
+	// Dashboard rollup — admin only, since it spans every site.
+	mux.HandleFunc("GET /sites/overview", s.requireAdmin(s.handleOverview))
+
 	// Data endpoints (pull-only) — this site's key or the admin key.
+	mux.HandleFunc("GET /sites/{id}/series", s.requireSiteRead(s.handleSeries))
 	mux.HandleFunc("GET /sites/{id}/status", s.requireSiteRead(s.handleStatus))
 	mux.HandleFunc("GET /sites/{id}/uptime", s.requireSiteRead(s.handleUptime))
 	mux.HandleFunc("GET /sites/{id}/metrics", s.requireSiteRead(s.handleMetrics))
@@ -67,7 +180,82 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /sites/{id}/incidents", s.requireSiteRead(s.handleIncidents))
 	mux.HandleFunc("GET /sites/{id}/results", s.requireSiteRead(s.handleResults))
 
-	return s.withCORS(mux)
+	return mux
+}
+
+// warnDeprecated logs requests arriving on the legacy (unprefixed) paths before
+// passing them through unchanged. The warning names the caller so you can tell
+// which consumer still needs migrating; it is rate-limited per path so a polling
+// client leaves one line an hour rather than one per request.
+func (s *Server) warnDeprecated(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.shouldLogDeprecation(r.URL.Path) {
+			log.Printf("api: DEPRECATED legacy path %s %s from %s — migrate to /api%s",
+				r.Method, r.URL.Path, s.callerIP(r), r.URL.Path)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// shouldLogDeprecation reports whether path is due another warning, recording
+// the time when it is.
+func (s *Server) shouldLogDeprecation(path string) bool {
+	s.deprecationMu.Lock()
+	defer s.deprecationMu.Unlock()
+	now := time.Now()
+	if last, ok := s.deprecationSeen[path]; ok && now.Sub(last) < deprecationLogEvery {
+		return false
+	}
+	s.deprecationSeen[path] = now
+	return true
+}
+
+// callerIP identifies the client, for deprecation warnings and as the
+// rate-limiting key.
+//
+// Behind a reverse proxy every RemoteAddr is loopback, so the real address has
+// to come from a header — but only one the proxy is known to set itself. That
+// is what realIPHeader names, and it defaults to empty: with nothing
+// configured this returns RemoteAddr and no header can influence it.
+//
+// The default is deliberately fail-safe. An earlier version always read the
+// first X-Forwarded-For entry, which a client can forge: Cloudflare (like most
+// proxies) *appends* to any inbound X-Forwarded-For rather than replacing it,
+// so the leftmost value is whatever the caller sent. Since this value keys the
+// login rate limiter, trusting it lets an attacker rotate fabricated addresses
+// and walk past the per-IP throttle.
+//
+// Behind Cloudflare, set -real-ip-header=CF-Connecting-IP: Cloudflare
+// overwrites that header on every proxied request, so a client cannot supply
+// it. Note that this only holds for traffic that actually passes through
+// Cloudflare — an origin reachable directly on 443 can still be sent a forged
+// header, so restricting the origin to Cloudflare's ranges is the other half of
+// the job.
+func (s *Server) callerIP(r *http.Request) string {
+	if s.realIPHeader != "" {
+		if v := r.Header.Get(s.realIPHeader); v != "" {
+			// Single-value headers such as CF-Connecting-IP carry one address.
+			// A list-style header is split for tolerance, but see the warning
+			// above before configuring one of those.
+			if i := strings.IndexByte(v, ','); i >= 0 {
+				v = v[:i]
+			}
+			if v = strings.TrimSpace(v); v != "" {
+				return v
+			}
+		}
+	}
+	return r.RemoteAddr
+}
+
+// clientIP is callerIP reduced to a bare address, dropping any port. Used as a
+// rate-limiting key, where 1.2.3.4:5678 and 1.2.3.4:9012 must be one bucket.
+func (s *Server) clientIP(r *http.Request) string {
+	host := s.callerIP(r)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }
 
 // withCORS wraps the mux, adding CORS response headers when the request carries
@@ -112,25 +300,36 @@ func keyMatches(presented, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(want)) == 1
 }
 
-// adminOK reports whether the request carries the admin key.
+// adminOK reports whether the request carries an admin credential: the API key
+// (machine consumers) or a valid session cookie (the web UI).
 func (s *Server) adminOK(r *http.Request) bool {
-	return s.apiKey != "" && keyMatches(r.Header.Get("X-API-Key"), s.apiKey)
+	if s.apiKey != "" && keyMatches(r.Header.Get("X-API-Key"), s.apiKey) {
+		return true
+	}
+	return s.sessionOK(r)
 }
 
-// requireAdmin gates admin-only routes. When no admin key is configured, auth
-// is disabled (preserves the default single-node "just run it" behavior).
+// requireAdmin gates admin-only routes.
+//
+// This fails closed. Earlier versions treated "no -api-key configured" as "auth
+// disabled" and served config CRUD, including DELETE, to anyone who could reach
+// the port. That was survivable only while the service was loopback-only with no
+// browser surface; it is not now. cmd/monitor refuses to start without a
+// credential, so reaching here always means one is configured.
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiKey == "" || s.adminOK(r) {
+		if s.adminOK(r) {
 			next(w, r)
 			return
 		}
-		writeError(w, http.StatusUnauthorized, "admin API key required")
+		writeError(w, http.StatusUnauthorized, "admin credentials required")
 	}
 }
 
-// requireSiteRead gates per-site data routes: the admin key, or the site's own
-// key. Unknown sites 404 (the id is already the resource being addressed).
+// requireSiteRead gates per-site data routes: an admin credential, or the site's
+// own read key. Unknown sites 404 (the id is already the resource being
+// addressed). Like requireAdmin this fails closed — a site without its own key
+// is not public, it is admin-only.
 func (s *Server) requireSiteRead(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		site, err := s.reg.Get(r.PathValue("id"))
@@ -139,8 +338,6 @@ func (s *Server) requireSiteRead(next http.HandlerFunc) http.HandlerFunc {
 		}
 		presented := r.Header.Get("X-API-Key")
 		switch {
-		case s.apiKey == "" && site.APIKeyHash == "":
-			// No auth configured for this site: open.
 		case s.adminOK(r):
 			// Admin can read any site.
 		case site.APIKeyHash != "" && keyMatches(config.HashAPIKey(presented), site.APIKeyHash):
@@ -535,4 +732,36 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// handleOverview returns one row per site: config, live state, and uptime over
+// the requested window. Admin-only, because it spans every site — a per-site
+// read key must not become a way to enumerate the estate.
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	window, since := parseWindow(r)
+	rows, err := storage.Overview(s.reg, s.stores, window, since)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+// handleSeries returns bucketed uptime and latency for charting.
+func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
+	store, ok := s.storeFor(w, r)
+	if !ok {
+		return
+	}
+	window, since := parseWindow(r)
+	buckets := storage.DefaultSeriesBuckets
+	if v, err := strconv.Atoi(r.URL.Query().Get("buckets")); err == nil && v > 0 {
+		buckets = v
+	}
+	series, err := store.Series(window, since, buckets)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, series)
 }

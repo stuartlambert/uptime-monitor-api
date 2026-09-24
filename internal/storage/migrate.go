@@ -79,6 +79,87 @@ var registryMigrations = []migration{
 			`ALTER TABLE sites ADD COLUMN api_key_hash TEXT`,
 		},
 	},
+	{
+		version: 3,
+		// Admin accounts for the web UI. password_hash is a bcrypt digest, which
+		// carries its own salt and cost, so no separate columns are needed.
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS admin_users (
+				id            INTEGER PRIMARY KEY,
+				username      TEXT NOT NULL UNIQUE,
+				password_hash TEXT NOT NULL,
+				created_at    INTEGER NOT NULL,
+				updated_at    INTEGER NOT NULL
+			);`,
+		},
+	},
+	{
+		version: 4,
+		// Sessions are server-side so logout and password changes genuinely
+		// revoke, rather than only clearing the browser's copy. The id column
+		// holds a SHA-256 of the cookie value, never the value itself: a stolen
+		// database then yields no usable cookies.
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS sessions (
+				id           TEXT PRIMARY KEY,
+				user_id      INTEGER NOT NULL,
+				created_at   INTEGER NOT NULL,
+				expires_at   INTEGER NOT NULL,
+				last_seen_at INTEGER NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+			);`,
+			`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);`,
+			`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);`,
+		},
+	},
+	{
+		version: 5,
+		stmts: []string{
+			// Where an alert goes.
+			`CREATE TABLE IF NOT EXISTS alert_channels (
+				id         INTEGER PRIMARY KEY,
+				name       TEXT NOT NULL,
+				type       TEXT NOT NULL,
+				target     TEXT NOT NULL,
+				enabled    INTEGER NOT NULL DEFAULT 1,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			);`,
+			// What triggers one. site_id NULL means "every site", so a single
+			// rule covers sites added later without further configuration.
+			`CREATE TABLE IF NOT EXISTS alert_rules (
+				id            INTEGER PRIMARY KEY,
+				site_id       TEXT,
+				channel_id    INTEGER NOT NULL,
+				kind          TEXT NOT NULL,
+				enabled       INTEGER NOT NULL DEFAULT 1,
+				confirm_after INTEGER NOT NULL DEFAULT 2,
+				created_at    INTEGER NOT NULL,
+				updated_at    INTEGER NOT NULL,
+				FOREIGN KEY (channel_id) REFERENCES alert_channels(id) ON DELETE CASCADE
+			);`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_rules_site ON alert_rules(site_id);`,
+			// The send log, and the dedupe ledger. dedupe_key is UNIQUE and is
+			// claimed before sending, so a restart mid-incident cannot re-announce
+			// an outage and two workers cannot both send the same alert.
+			`CREATE TABLE IF NOT EXISTS alert_deliveries (
+				id          INTEGER PRIMARY KEY,
+				dedupe_key  TEXT NOT NULL UNIQUE,
+				site_id     TEXT NOT NULL,
+				kind        TEXT NOT NULL,
+				channel_id  INTEGER NOT NULL,
+				incident_id INTEGER,
+				subject     TEXT NOT NULL,
+				status      TEXT NOT NULL,
+				attempts    INTEGER NOT NULL DEFAULT 0,
+				error       TEXT,
+				created_at  INTEGER NOT NULL,
+				sent_at     INTEGER
+			);`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_deliveries_created ON alert_deliveries(created_at DESC);`,
+			`CREATE INDEX IF NOT EXISTS idx_alert_deliveries_site ON alert_deliveries(site_id);`,
+		},
+	},
 }
 
 // siteMigrations is the ordered schema history for each per-site database.
@@ -116,6 +197,16 @@ var siteMigrations = []migration{
 				ssl_expires_at        INTEGER,
 				ssl_last_checked      INTEGER
 			);`,
+		},
+	},
+	{
+		version: 2,
+		// Consecutive failing ticks, reset to 0 on any success. Alerting uses it
+		// to hold a down notification until a failure is confirmed, so one blip
+		// does not send mail. Kept here rather than derived with a query so
+		// RecordTick can maintain it in the transaction it already opens.
+		stmts: []string{
+			`ALTER TABLE site_state ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
 }

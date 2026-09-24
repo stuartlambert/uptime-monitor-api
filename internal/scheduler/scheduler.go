@@ -13,6 +13,13 @@ import (
 	"github.com/stuart/uptime-monitor/internal/storage"
 )
 
+// TransitionFunc is notified after every recorded tick, with what changed.
+//
+// It is called on the site's check goroutine, so it must return promptly —
+// the alert dispatcher satisfies this by queueing and returning. Declaring the
+// hook as a function keeps scheduler independent of internal/alerts.
+type TransitionFunc func(site config.SiteConfig, tr storage.Transition)
+
 // Manager supervises per-site check loops. It is safe for concurrent use; the
 // API calls Start/Stop/Restart as sites are created, updated, or deleted.
 type Manager struct {
@@ -21,6 +28,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+	onTrans TransitionFunc
 	wg      sync.WaitGroup
 }
 
@@ -31,6 +39,21 @@ func NewManager(stores *storage.Manager, runner *checker.Runner) *Manager {
 		runner:  runner,
 		cancels: map[string]context.CancelFunc{},
 	}
+}
+
+// OnTransition registers the post-tick hook. Safe to call before StartAll; a
+// nil hook means transitions are simply not reported.
+func (m *Manager) OnTransition(f TransitionFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onTrans = f
+}
+
+// transitionHook returns the current hook under lock.
+func (m *Manager) transitionHook() TransitionFunc {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.onTrans
 }
 
 // StartAll launches loops for every enabled site.
@@ -115,8 +138,15 @@ func (m *Manager) runSite(ctx context.Context, site config.SiteConfig) {
 		if runSlow {
 			lastSlow = time.Now()
 		}
-		if err := store.RecordTick(result); err != nil {
+		tr, err := store.RecordTick(result)
+		if err != nil {
 			log.Printf("scheduler: record tick for %s: %v", site.ID, err)
+			return
+		}
+		// Notify only after the write has committed: a hook that acted on an
+		// uncommitted transition could announce an outage the database rolled back.
+		if hook := m.transitionHook(); hook != nil {
+			hook(site, tr)
 		}
 	}
 

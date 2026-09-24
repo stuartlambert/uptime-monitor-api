@@ -13,10 +13,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/stuart/uptime-monitor/internal/alerts"
 	"github.com/stuart/uptime-monitor/internal/api"
 	"github.com/stuart/uptime-monitor/internal/checker"
 	"github.com/stuart/uptime-monitor/internal/config"
@@ -33,6 +35,9 @@ func main() {
 		seedPath   = flag.String("seed", "", "optional JSON file of site configs to import on startup")
 		blockPriv  = flag.Bool("block-private-targets", false, "refuse to check private/loopback/link-local addresses (SSRF guard); leave off to monitor internal hosts")
 		corsOrigin = flag.String("cors-origins", "https://portal.pinkcrab.co.uk", "comma-separated browser origins allowed via CORS (empty = disabled)")
+		legacyRts  = flag.Bool("legacy-routes", true, "also serve the API on the pre-/api/ paths (deprecated; set false once all consumers use /api/)")
+		setPwUser  = flag.String("set-password", "", "set (or create) this admin user's password, prompting on the terminal, then exit")
+		realIPHdr  = flag.String("real-ip-header", "", "header carrying the client's real address, set by a trusted proxy (behind Cloudflare: CF-Connecting-IP). Empty = trust none and use the connecting address")
 	)
 	flag.Parse()
 
@@ -44,6 +49,9 @@ func main() {
 		seedPath:    *seedPath,
 		blockPriv:   *blockPriv,
 		corsOrigins: splitOrigins(*corsOrigin),
+		legacyRts:   *legacyRts,
+		setPwUser:   *setPwUser,
+		realIPHdr:   *realIPHdr,
 	}); err != nil {
 		log.Fatal(err)
 	}
@@ -57,6 +65,9 @@ type runOpts struct {
 	seedPath    string
 	blockPriv   bool
 	corsOrigins []string
+	legacyRts   bool
+	setPwUser   string
+	realIPHdr   string
 }
 
 func run(o runOpts) error {
@@ -73,6 +84,31 @@ func run(o runOpts) error {
 	}
 	defer reg.Close()
 
+	// Administrative one-shot: set a password and exit without starting checks
+	// or listening. Placed before any other setup so it works on a broken host.
+	if o.setPwUser != "" {
+		return setPassword(reg, o.setPwUser)
+	}
+
+	haveAdminUser, err := seedAdminUser(reg)
+	if err != nil {
+		return err
+	}
+	// Fail closed. Previously an instance with no -api-key served config CRUD,
+	// including DELETE, to anyone who could reach the port. Refusing to start is
+	// the only safe reading now that a browser-facing login exists: a silently
+	// open admin API is worse than an outage, because nothing signals it.
+	if o.apiKey == "" && !haveAdminUser {
+		return errors.New("refusing to start: no admin credential configured — " +
+			"set UPTIME_API_KEY, or seed an account with UPTIME_ADMIN_USER and " +
+			"UPTIME_ADMIN_PASSWORD, or run with -set-password <username>")
+	}
+	if n, err := reg.PurgeExpiredSessions(); err != nil {
+		log.Printf("auth: purge expired sessions: %v", err)
+	} else if n > 0 {
+		log.Printf("auth: purged %d expired session(s)", n)
+	}
+
 	if o.seedPath != "" {
 		if err := seed(reg, stores, o.seedPath); err != nil {
 			return err
@@ -82,6 +118,27 @@ func run(o runOpts) error {
 	runner := checker.NewRunner(o.reqTimeout, o.blockPriv)
 	sched := scheduler.NewManager(stores, runner)
 
+	// Alerting. Without a mail server configured the dispatcher still runs and
+	// still records deliveries, so the delivery log shows what would have been
+	// sent — but the send itself reports the missing configuration.
+	smtpCfg := smtpConfigFromEnv()
+	var sender alerts.Sender
+	if smtpCfg.Configured() {
+		sender = alerts.NewSMTPSender(smtpCfg)
+		log.Printf("alerts: smtp configured (%s, from %s)", smtpCfg.Addr(), smtpCfg.From)
+	} else {
+		log.Print("alerts: smtp not configured; alerts will be recorded but not delivered " +
+			"(set UPTIME_SMTP_HOST and UPTIME_SMTP_FROM)")
+		sender = alerts.NewSMTPSender(smtpCfg) // returns a clear error on send
+	}
+	dispatcher := alerts.NewDispatcher(reg, sender, alerts.Options{})
+	defer dispatcher.Shutdown()
+
+	// The hook runs on the site's check goroutine, so it only queues.
+	sched.OnTransition(func(site config.SiteConfig, tr storage.Transition) {
+		dispatcher.Enqueue(alerts.Event{Site: site, Transition: tr, At: time.Now()})
+	})
+
 	sites, err := reg.List()
 	if err != nil {
 		return err
@@ -90,8 +147,10 @@ func run(o runOpts) error {
 	log.Printf("monitor: started, %d site(s) configured (block-private-targets=%v)", len(sites), o.blockPriv)
 
 	srv := &http.Server{
-		Addr:              o.addr,
-		Handler:           api.NewServer(reg, stores, sched, o.apiKey, o.corsOrigins...).Handler(),
+		Addr: o.addr,
+		Handler: api.NewServer(reg, stores, sched, o.apiKey, o.corsOrigins...).
+			WithLegacyRoutes(o.legacyRts).WithSender(sender).
+			WithRealIPHeader(o.realIPHdr).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -101,7 +160,12 @@ func run(o runOpts) error {
 	// Serve until an interrupt/terminate signal arrives.
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("monitor: REST API listening on %s", o.addr)
+		realIP := o.realIPHdr
+		if realIP == "" {
+			realIP = "none (using connecting address)"
+		}
+		log.Printf("monitor: REST API listening on %s (prefix /api/, legacy-routes=%v, admin-user=%v, api-key=%v, real-ip-header=%s)",
+			o.addr, o.legacyRts, haveAdminUser, o.apiKey != "", realIP)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -180,4 +244,24 @@ func splitOrigins(s string) []string {
 		}
 	}
 	return out
+}
+
+// smtpConfigFromEnv reads mail settings from the environment.
+//
+// Environment rather than flags or the database: credentials on a command line
+// are visible in `ps`, and in the database they would be readable through any
+// future config-export endpoint. /etc/uptime-monitor.env is already root-only.
+func smtpConfigFromEnv() alerts.SMTPConfig {
+	port, err := strconv.Atoi(os.Getenv("UPTIME_SMTP_PORT"))
+	if err != nil || port <= 0 {
+		port = 587 // submission with STARTTLS
+	}
+	return alerts.SMTPConfig{
+		Host:               strings.TrimSpace(os.Getenv("UPTIME_SMTP_HOST")),
+		Port:               port,
+		Username:           os.Getenv("UPTIME_SMTP_USER"),
+		Password:           os.Getenv("UPTIME_SMTP_PASS"),
+		From:               strings.TrimSpace(os.Getenv("UPTIME_SMTP_FROM")),
+		InsecureSkipVerify: os.Getenv("UPTIME_SMTP_INSECURE") == "true",
+	}
 }

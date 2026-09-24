@@ -25,14 +25,14 @@ func down(ts int64) Tick {
 func TestIncidentOpenAndResolve(t *testing.T) {
 	s := newStore(t)
 
-	if err := s.RecordTick(up(1000)); err != nil {
+	if _, err := s.RecordTick(up(1000)); err != nil {
 		t.Fatal(err)
 	}
 	// Two consecutive failures: a single incident should open and stay open.
-	if err := s.RecordTick(down(1060)); err != nil {
+	if _, err := s.RecordTick(down(1060)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordTick(down(1120)); err != nil {
+	if _, err := s.RecordTick(down(1120)); err != nil {
 		t.Fatal(err)
 	}
 	incs, err := s.Incidents(10)
@@ -47,7 +47,7 @@ func TestIncidentOpenAndResolve(t *testing.T) {
 	}
 
 	// Recovery resolves it.
-	if err := s.RecordTick(up(1180)); err != nil {
+	if _, err := s.RecordTick(up(1180)); err != nil {
 		t.Fatal(err)
 	}
 	incs, _ = s.Incidents(10)
@@ -71,7 +71,7 @@ func TestUptimePercent(t *testing.T) {
 	s := newStore(t)
 	// 3 up, 1 down => 75%.
 	for _, tk := range []Tick{up(1), up(2), down(3), up(4)} {
-		if err := s.RecordTick(tk); err != nil {
+		if _, err := s.RecordTick(tk); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -87,9 +87,106 @@ func TestUptimePercent(t *testing.T) {
 	}
 }
 
+func TestUptimePercentRoundedTo2dp(t *testing.T) {
+	s := newStore(t)
+	// 211 up / 212 checks = 99.5283018867...% -> 99.53
+	for i := 1; i <= 211; i++ {
+		if _, err := s.RecordTick(up(int64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.RecordTick(down(212)); err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.Uptime("all", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Percent != 99.53 {
+		t.Errorf("uptime = %v, want 99.53", u.Percent)
+	}
+}
+
+func TestUptimePercentAllUpIsExactly100(t *testing.T) {
+	s := newStore(t)
+	for i := 1; i <= 3; i++ {
+		if _, err := s.RecordTick(up(int64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u, err := s.Uptime("all", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Percent != 100 {
+		t.Errorf("uptime = %v, want 100", u.Percent)
+	}
+}
+
+func TestMetricsAvgMsRoundedTo2dp(t *testing.T) {
+	s := newStore(t)
+	// response_ms of 100, 100, 101 => avg 100.333... -> 100.33
+	for _, tk := range []Tick{
+		{TS: 1, Up: true, StatusCode: 200, ResponseMs: 100},
+		{TS: 2, Up: true, StatusCode: 200, ResponseMs: 100},
+		{TS: 3, Up: true, StatusCode: 200, ResponseMs: 101},
+	} {
+		if _, err := s.RecordTick(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := s.Metrics("all", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.AvgMs != 100.33 {
+		t.Errorf("avg_ms = %v, want 100.33", m.AvgMs)
+	}
+}
+
+func TestMetricsAvgMsExcludesFailedChecks(t *testing.T) {
+	s := newStore(t)
+	// up() records response_ms 100; down() records 50. The average must reflect
+	// only the two successful checks (100), not all three (83.33).
+	for _, tk := range []Tick{up(1), up(2), down(3)} {
+		if _, err := s.RecordTick(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := s.Metrics("all", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Counts still span every row.
+	if m.Checks != 3 || m.Successful != 2 || m.Failed != 1 {
+		t.Errorf("counts = %+v, want 3/2/1", m)
+	}
+	if m.AvgMs != 100 {
+		t.Errorf("avg_ms = %v, want 100 (failed check must be excluded)", m.AvgMs)
+	}
+}
+
+func TestMetricsAvgMsZeroWhenNoSuccessfulChecks(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.RecordTick(down(1)); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Metrics("all", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Checks != 1 || m.Failed != 1 {
+		t.Errorf("counts = %+v, want 1 check / 1 failed", m)
+	}
+	// AVG over zero rows is NULL; NullFloat64 yields 0, not an error.
+	if m.AvgMs != 0 {
+		t.Errorf("avg_ms = %v, want 0", m.AvgMs)
+	}
+}
+
 func TestErrorsLogged(t *testing.T) {
 	s := newStore(t)
-	if err := s.RecordTick(down(500)); err != nil {
+	if _, err := s.RecordTick(down(500)); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := s.Errors(0, 10)
@@ -105,7 +202,7 @@ func TestPercentiles(t *testing.T) {
 	s := newStore(t)
 	// response_ms 1..100 on successful checks.
 	for i := int64(1); i <= 100; i++ {
-		if err := s.RecordTick(Tick{TS: i, Up: true, StatusCode: 200, ResponseMs: i}); err != nil {
+		if _, err := s.RecordTick(Tick{TS: i, Up: true, StatusCode: 200, ResponseMs: i}); err != nil {
 			t.Fatal(err)
 		}
 	}

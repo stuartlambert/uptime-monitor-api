@@ -1,6 +1,9 @@
 package storage
 
-import "database/sql"
+import (
+	"database/sql"
+	"math"
+)
 
 // Status is the current live state of a site.
 type Status struct {
@@ -60,7 +63,9 @@ func (s *SiteStore) Uptime(window string, sinceTS int64) (Uptime, error) {
 	}
 	u.Failed = u.Checks - u.Successful
 	if u.Checks > 0 {
-		u.Percent = float64(u.Successful) / float64(u.Checks) * 100
+		// Rounded to 2dp: the raw quotient carries meaningless float noise
+		// (99.52353262342354) that every consumer would have to trim itself.
+		u.Percent = math.Round(float64(u.Successful)/float64(u.Checks)*10000) / 100
 	}
 	return u, nil
 }
@@ -77,19 +82,29 @@ type Metrics struct {
 	P99Ms      int64   `json:"p99_ms"`
 }
 
-// Metrics computes counts and latency percentiles over successful checks since
-// `sinceTS`. Percentiles use an ORDER BY + OFFSET query so we never load the
-// whole window into memory.
+// Metrics computes check counts over all checks since `sinceTS`, plus latency
+// figures (average and percentiles) over the successful ones only — a failed
+// check's response_ms reflects how fast it errored, not how fast the site
+// served, so including it would skew the latency picture.
+// Percentiles use an ORDER BY + OFFSET query so we never load the whole window
+// into memory.
 func (s *SiteStore) Metrics(window string, sinceTS int64) (Metrics, error) {
 	m := Metrics{Window: window}
 	var avg sql.NullFloat64
-	err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(up),0), AVG(response_ms)
+	// COUNT/SUM span every row (they are the check totals), while the average is
+	// restricted to successful checks so it agrees with the percentiles below.
+	// A CASE inside AVG does that without filtering the other two aggregates —
+	// AVG skips NULLs, so failed rows drop out of the mean only.
+	err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(up),0),
+			AVG(CASE WHEN up = 1 THEN response_ms END)
 		FROM check_results WHERE ts >= ?`, sinceTS).Scan(&m.Checks, &m.Successful, &avg)
 	if err != nil {
 		return m, err
 	}
 	m.Failed = m.Checks - m.Successful
-	m.AvgMs = avg.Float64
+	// Rounded to 2dp for the same reason as Uptime.Percent: SQL AVG() returns
+	// full float precision that no consumer wants to render raw.
+	m.AvgMs = math.Round(avg.Float64*100) / 100
 
 	for _, p := range []struct {
 		q   float64
