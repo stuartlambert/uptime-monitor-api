@@ -1,85 +1,102 @@
 ---
 title: API
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 
-Base URL `https://monitor.pinkcrab.co.uk/api`. JSON in, JSON out. Authenticate
-with an `X-API-Key` header or the session cookie from `/auth/login`. See
-[Access](access.md#api-keys) for which key to use.
+# API
 
-Everything fails closed: only `/health` and `/auth/login` answer without a
-credential, and a site with no per-site key is admin-only rather than public.
+Base URL `https://monitor.pinkcrab.co.uk/api`; authenticate with an `X-API-Key`
+header or the session cookie from `/auth/login` — see [access](access.md#api-keys).
 
-## Auth
+Everything fails closed. Only `/health` and `/auth/login` answer without a
+credential, and a site with no per-site key is admin-only, not public.
 
-| Method | Path | Auth | Purpose |
-|---|---|---|---|
-| POST | `/auth/login` | none | exchange username + password for a session cookie |
-| POST | `/auth/logout` | none | revoke the current session server-side |
-| GET | `/auth/me` | admin | who the caller is |
-| POST | `/auth/password` | session only | change password; revokes every session |
+## Endpoints
 
-`/auth/password` refuses an API key — a leaked machine key cannot take over the
+### Auth
+
+| Method | Path | Auth | Body | Returns |
+|---|---|---|---|---|
+| POST | `/auth/login` | none | `{username, password}` | sets session cookie; `{username, expires_at}` |
+| POST | `/auth/logout` | none | — | 204; revokes the session server-side |
+| GET | `/auth/me` | admin | — | `{username, auth}` — `auth` is `session` or `api_key` |
+| POST | `/auth/password` | session only | `{current_password, new_password}` | `{status}`; revokes every session |
+
+`/auth/password` refuses an API key, so a leaked machine key cannot take over the
 account.
 
-## Sites
+### Sites
 
-| Method | Path | Auth | Purpose |
-|---|---|---|---|
-| GET | `/sites` | admin | list site configs |
-| POST | `/sites` | admin | create a site |
-| GET | `/sites/{id}` | admin | one site's config |
-| PUT | `/sites/{id}` | admin | update (send the whole object; `id` immutable) |
-| DELETE | `/sites/{id}` | admin | remove; `?purge=true` also deletes its history |
-| GET | `/sites/overview` | admin | every site with live state and uptime |
+| Method | Path | Auth | Body | Returns |
+|---|---|---|---|---|
+| GET | `/sites` | admin | — | array of site configs |
+| POST | `/sites` | admin | site config | the created site; `api_key` once if generated |
+| GET | `/sites/{id}` | admin | — | one site config |
+| PUT | `/sites/{id}` | admin | full site config | the updated site (`id` immutable) |
+| DELETE | `/sites/{id}` | admin | — | 204; `?purge=true` also deletes its history |
+| GET | `/sites/overview` | admin | — | every site with live state and uptime |
 
 `id` is slugified from `name` on create — "English Stamp" becomes `english-stamp`.
 
-## Site data
+### Site data
 
-Readable with that site's own key or an admin credential.
+That site's own key, or any admin credential.
 
-| Method | Path | Parameters |
-|---|---|---|
-| GET | `/sites/{id}/status` | — |
-| GET | `/sites/{id}/uptime` | `window` |
-| GET | `/sites/{id}/metrics` | `window` |
-| GET | `/sites/{id}/series` | `window`, `buckets` |
-| GET | `/sites/{id}/incidents` | `limit` |
-| GET | `/sites/{id}/errors` | `since`, `limit` |
-| GET | `/sites/{id}/results` | `since`, `limit` |
+| Method | Path | Parameters | Returns |
+|---|---|---|---|
+| GET | `/sites/{id}/status` | — | current up/down, last check, cert expiry |
+| GET | `/sites/{id}/uptime` | `window` | checks, successful, failed, `uptime_percent` |
+| GET | `/sites/{id}/metrics` | `window` | counts plus `avg_ms`, p50/p95/p99 |
+| GET | `/sites/{id}/series` | `window`, `buckets` | bucketed uptime and latency for charts |
+| GET | `/sites/{id}/incidents` | `limit` | down periods with cause and duration |
+| GET | `/sites/{id}/errors` | `since`, `limit` | stored errors, newest first |
+| GET | `/sites/{id}/results` | `since`, `limit` | raw check rows |
 
 | Parameter | Values |
 |---|---|
-| `window` | `1h`, `24h`, `7d`, `30d`, `all` (default `all`; anything else falls back to `all`) |
+| `window` | `1h`, `24h`, `7d`, `30d`, `all` — default `all`; anything unrecognised falls back to `all` |
 | `buckets` | default 96, capped at 1000 |
 | `limit` | default 100, capped at 10000 |
 | `since` | unix seconds |
 
-## Alerts
+### Alerts
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/alerts/channels` | list destinations |
-| POST | `/alerts/channels` | create one |
-| PUT | `/alerts/channels/{id}` | update |
-| DELETE | `/alerts/channels/{id}` | delete (cascades to its rules) |
-| POST | `/alerts/channels/{id}/test` | send a real test message now |
-| GET | `/alerts/rules` | list rules |
-| POST | `/alerts/rules` | create one |
-| PUT | `/alerts/rules/{id}` | update |
-| DELETE | `/alerts/rules/{id}` | delete |
-| GET | `/alerts/deliveries` | send log; `?site_id=`, `?limit=` |
+All admin-only. Semantics are on [features](features.md#alerting).
 
-All admin-only. See [Features](features.md#alerting) for the rule semantics.
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/alerts/channels` | — | destinations |
+| POST | `/alerts/channels` | `{name, type, target, enabled}` | the created channel |
+| PUT | `/alerts/channels/{id}` | same | the updated channel |
+| DELETE | `/alerts/channels/{id}` | — | 204; cascades to its rules |
+| POST | `/alerts/channels/{id}/test` | — | sends a real message now |
+| GET | `/alerts/rules` | — | rules |
+| POST | `/alerts/rules` | `{channel_id, kind, site_id, confirm_after}` | the created rule |
+| PUT | `/alerts/rules/{id}` | same | the updated rule |
+| DELETE | `/alerts/rules/{id}` | — | 204 |
+| GET | `/alerts/deliveries` | `?site_id=`, `?limit=` | the send log |
 
-## Health
+### Health
 
-| Method | Path | Auth |
-|---|---|---|
-| GET | `/health` | none — `{"status":"ok","time":…}` |
+| Method | Path | Auth | Returns |
+|---|---|---|---|
+| GET | `/health` | none | `{"status":"ok","time":…}` |
 
-## Creating a site
+## Errors
+
+JSON, one field: `{"error": "admin credentials required"}`.
+
+| Status | Meaning |
+|---|---|
+| 400 | bad JSON, or a field failed validation — `url` is required and must be http/https |
+| 401 | missing or wrong credential |
+| 404 | unknown site id; an unmatched route returns Go's plain-text 404 instead |
+| 409 | a site with that id already exists |
+| 429 | login throttled; `Retry-After` gives the seconds |
+| 502 | a test send reached SMTP and it refused — the server's own error is in the body |
+| 503 | test send attempted with no mail transport configured |
+
+## Example
 
 ```bash
 curl -X POST https://monitor.pinkcrab.co.uk/api/sites \
@@ -99,34 +116,27 @@ curl -X POST https://monitor.pinkcrab.co.uk/api/sites \
       }'
 ```
 
-The response carries `api_key` **once**. Save it.
-
-## Reading data
+The response carries `api_key` once. Then read it back:
 
 ```bash
 curl -H "X-API-Key: $SITE_KEY" \
-  'https://monitor.pinkcrab.co.uk/api/sites/english-stamp/uptime?window=24h'
+  'https://monitor.pinkcrab.co.uk/api/sites/my-site/uptime?window=24h'
 ```
 
-## Errors
-
-| Status | Meaning |
-|---|---|
-| 400 | bad JSON, or a field failed validation (`url` is required and must be http/https) |
-| 401 | missing or wrong credential |
-| 404 | unknown site id, or an unmatched route (plain text) |
-| 409 | a site with that id already exists |
-| 429 | login throttled |
-| 502 | test-send reached SMTP and it refused — the server's error is in the body |
-
-## Legacy paths (retiring)
+## Legacy paths
 
 The API also answers without the `/api` prefix — `/sites/…`, `/health` — kept
-while consumers migrate. They log a rate-limited deprecation warning naming the
-caller. Retirement is `docs/ROLLOUT.md` §7, in order: confirm the log is quiet,
-remove the Apache proxy lines and the two Cloudflare Access bypasses, then set
+while consumers migrate, controlled by `-legacy-routes` (default on). Those
+requests log a rate-limited deprecation warning naming the caller:
+
+```bash
+ssh ionos-vps 'journalctl -u uptime-monitor | grep DEPRECATED'
+```
+
+Retirement is `docs/ROLLOUT.md` §7, in order: confirm the log is quiet, remove
+the Apache proxy lines and the two Cloudflare Access bypasses, then set
 `-legacy-routes=false`.
 
-Anything still pointing an uptime check at `/health` must move to `/api/health`
-first — afterwards `/health` returns the SPA shell with a 200, so a checker would
-report healthy for ever.
+Move anything pointing an uptime check at `/health` to `/api/health` **first** —
+afterwards `/health` falls through to the SPA and returns HTML with a 200, so a
+checker would report healthy for ever.

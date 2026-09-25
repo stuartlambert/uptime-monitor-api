@@ -1,7 +1,9 @@
 ---
 title: FAQ
-updated: 2026-09-24
+updated: 2026-09-25
 ---
+
+# FAQ
 
 ## How do I add a site?
 
@@ -9,7 +11,7 @@ In the UI: **Add site** on the dashboard. Fill in name and URL, enable the check
 you want, and tick *Generate a read key* if a consumer needs one — it is shown
 once on save and cannot be retrieved afterwards.
 
-By API, see [the example](api.md#creating-a-site).
+By API, see [the example](api.md#example).
 
 ## How do I give someone access to one site's data?
 
@@ -20,8 +22,9 @@ replacement and the old one stops working at once.
 
 ## I'm locked out of the admin UI
 
-Five failed logins for a username or from an IP blocks sign-in for 15 minutes.
-The counter is in memory:
+Five failed logins for a username or from an IP block sign-in for 15 minutes
+(`DefaultMaxAttempts` and `DefaultWindow` in `internal/auth/ratelimit.go`). The
+counter is in memory, so a restart clears it:
 
 ```bash
 ssh ionos-vps 'systemctl restart uptime-monitor'
@@ -81,8 +84,10 @@ the rule if you want every blip.
 
 ## The dashboard shows "No data" for a new site
 
-Checks start within one interval, up to 60 seconds by default. `up` is `null`
-until the first completes — distinct from `false`, meaning down.
+Only for a second or two. Saving a site calls `scheduler.Manager.Start()`, whose
+loop runs one check immediately rather than waiting out the interval. `up` is
+`null` until that first check completes — distinct from `false`, which means
+down. If it stays `null`, the site is disabled or the daemon is not running.
 
 ## Why did avg_ms change when nothing happened?
 
@@ -107,12 +112,13 @@ Untick *Actively check this site*. Deleting removes the configuration; only
 ## How big will this get?
 
 About 30 MB per site per year at one check a minute; nothing is pruned. See
-`docs/STORAGE.md`.
+`docs/STORAGE.md` in the repo.
 
 ## Can I run it against a local or internal host?
 
 Not as configured — `-block-private-targets` refuses private, loopback and
-link-local addresses as an SSRF guard. Remove the flag from the unit to allow it,
+link-local addresses as an SSRF guard (`blockPrivateAddr()` in
+`internal/checker/checker.go`). Remove the flag from the unit to allow it,
 accepting that anyone who can add a site can then probe the internal network.
 
 ## Is a fresh clone of the repo enough to deploy?
